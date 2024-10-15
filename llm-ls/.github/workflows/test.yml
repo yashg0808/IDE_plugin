@@ -1,0 +1,210 @@
+name: test
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  testbed:
+    strategy:
+      matrix:
+        repo:
+          - { name: simple, key: simple, parallel: 8, node: false, python: false }
+          - { name: mmaitre314/picklescan, key: picklescan, parallel: 8, node: false, python: true }
+          - { name: huggingface/huggingface_hub, key: huggingface_hub, parallel: 8, node: false, python: true }
+          - { name: tiangolo/fastapi, key: fastapi, parallel: 8, node: false, python: true }
+          - { name: encode/starlette, key: starlette, parallel: 8, node: false, python: true }
+          - { name: lancedb/lancedb, key: lancedb, parallel: 2, node: false, python: false }
+          # - { name: lancedb/lance, key: lance, parallel: 2, node: false, python: false }
+          - { name: tkaitchuck/constrandom, key: constrandom, parallel: 8, node: false, python: false }
+          - { name: jaemk/cached, key: cached, parallel: 4, node: false, python: false }
+          - { name: smol-rs/async-executor, key: async-executor, parallel: 4, node: false, python: false }
+          - { name: gcanti/io-ts, key: io-ts, parallel: 8, node: true, python: false }
+          - { name: colinhacks/zod, key: zod, parallel: 8, node: true, python: false }
+          - { name: helix-editor/helix, key: helix, parallel: 2, node: false, python: false }
+    runs-on: [self-hosted, intel-cpu, 8-cpu, ci]
+    container:
+      image: ubuntu:22.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          apt update
+          DEBIAN_FRONTEND=noninteractive apt install -y pkg-config protobuf-compiler libssl-dev curl build-essential git-all gfortran
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Python 3.10
+        uses: actions/setup-python@v5
+        if: matrix.repo.python
+        with:
+          python-version: '3.10'
+
+      - name: Install node 18
+        uses: actions/setup-node@v4
+        if: matrix.repo.node
+        with:
+          node-version: 18
+
+      - name: Install yarn
+        if: matrix.repo.node
+        run: |
+          npm i -g yarn
+
+      - name: Set up cargo cache
+        uses: actions/cache@v4
+        continue-on-error: false
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+
+      - name: Build project
+        run: cargo build -r
+
+      - name: Run testbed
+        run: 'cargo run --bin testbed -r -- --api-token $API_TOKEN -r `pwd`/crates/testbed/repositories-ci.yaml -f ${{ matrix.repo.name }} -p ${{ matrix.repo.parallel }}'
+        if: github.event_name == 'push' || github.event_name == 'pull_request'
+        env:
+          API_TOKEN: ${{ secrets.API_TOKEN }}
+          LOG_LEVEL: ${{ github.run_attempt > 1 && 'debug' || 'info' }}
+
+      - name: Run testbed
+        run: 'cargo run --bin testbed -r -- --api-token $API_TOKEN -f ${{ matrix.repo.name }} -p ${{ matrix.repo.parallel }}'
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          API_TOKEN: ${{ secrets.API_TOKEN }}
+          LOG_LEVEL: ${{ github.run_attempt > 1 && 'debug' || 'info' }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: results-${{ matrix.repo.key }}
+          path: ./results.json
+
+  comment_results:
+    needs: [testbed]
+    runs-on: [self-hosted, intel-cpu, 8-cpu, ci]
+    container:
+      image: ubuntu:22.04
+    steps:
+      - name: Install dependencies
+        run: |
+          apt update
+          apt install -y jq
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: results-simple
+          path: results-simple
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: results-picklescan
+          path: results-picklescan
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: results-huggingface_hub
+          path: results-huggingface_hub
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: results-fastapi
+          path: results-fastapi
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: results-starlette
+          path: results-starlette
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: results-lancedb
+          path: results-lancedb
+
+      # - uses: actions/download-artifact@v4
+      #   with:
+      #     name: results-lance
+      #     path: results-lance
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: results-constrandom
+          path: results-constrandom
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: results-cached
+          path: results-cached
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: results-async-executor
+          path: results-async-executor
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: results-io-ts
+          path: results-io-ts
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: results-zod
+          path: results-zod
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: results-helix
+          path: results-helix
+
+      - name: Display structure of downloaded files
+        run: ls -R
+
+      - name: output to markdown
+        run: |
+          cat > results.md  <<EOF
+          | Repository name | Source type | Average hole completion time (s) | Pass percentage |
+          | :-------------- | :---------- | -------------------------------: | --------------: |
+          EOF
+          cat **/results.json | jq -r '"| \(.[0].repo_name) | \(.[0].source_type) | \(.[0].avg_hole_completion_time_ms) | \(.[0].pass_percentage)% |"' >> results.md
+          cat >> results.md <<EOF
+
+          **Note:** The "hole completion time" represents the full process of:
+            - copying files from the setup cache directory
+            - replacing the code from the file with a completion from the model
+            - building the project
+            - running the tests
+          EOF
+
+      - name: Find Comment
+        uses: peter-evans/find-comment@v2
+        id: fc
+        if: github.event_name == 'pull_request'
+        with:
+          issue-number: ${{ github.event.pull_request.number }}
+          comment-author: 'github-actions[bot]'
+          body-includes: '| Repository name | Source type | Average hole completion time (s) | Pass percentage |'
+
+      - name: Create or update comment
+        if: github.event_name == 'pull_request'
+        uses: peter-evans/create-or-update-comment@v3
+        with:
+          comment-id: ${{ steps.fc.outputs.comment-id }}
+          issue-number: ${{ github.event.pull_request.number }}
+          body-path: results.md
+          edit-mode: replace
+

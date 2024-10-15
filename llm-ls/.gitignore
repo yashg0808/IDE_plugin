@@ -1,0 +1,7 @@
+.vscode/
+dist/
+target/
+.DS_Store
+__pycache__/
+results.json
+.pytest_cache/
